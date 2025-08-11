@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Random Ding</title>
+  <style>
+    :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
+    body { margin: 0; background: #0b1020; color: #e8ecf1; display: grid; place-items: center; min-height: 100svh; }
+    .card { width: min(640px, 92vw); background: #121a33; border: 1px solid #1d294d; border-radius: 16px; padding: 20px; box-shadow: 0 10px 30px rgba(0,0,0,.3); }
+    .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    input[type="number"] { padding: 10px 12px; font-size: 16px; border-radius: 10px; border: 1px solid #2c3a6a; background: #0e1530; color: #e8ecf1; width: 160px; }
+    button { padding: 10px 14px; border-radius: 10px; border: 1px solid #2c3a6a; background: #1a2550; color: #e8ecf1; cursor: pointer; font-weight: 600; }
+    button:hover{ filter: brightness(1.1); }
+    button:disabled{ opacity:.5; cursor: not-allowed; }
+    label { font-size: 14px; opacity: .9; }
+    .status { margin-top: 12px; font: 600 16px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .flash { animation: flash .35s ease; }
+    @keyframes flash { from { background: #22306c; } to { background: transparent; } }
+    .pill { display:inline-block; padding:2px 8px; border-radius: 999px; background:#243268; border:1px solid #2c3a6a; margin-left:8px; font-size:12px; }
+  </style>
+</head>
+<body>
+  <div class="card" id="card">
+    <h1 style="margin-top:0">Random Ding</h1>
+    <p style="margin-top:-6px; opacity:.85">Enter a maximum value <span class="pill">N</span>. Every second the app rolls a random integer in <span class="pill">[1, N]</span>. If it’s <strong>1</strong>, you’ll get a ding (and optional desktop notification).</p>
+
+    <div class="row">
+      <label for="maxSeconds">Max seconds (N)</label>
+      <input id="maxSeconds" type="number" min="1" step="1" value="60" />
+      <button id="start">Start</button>
+      <button id="stop" disabled>Stop</button>
+    </div>
+
+    <div class="row" style="margin-top:8px">
+      <input id="notify" type="checkbox" />
+      <label for="notify">Use desktop notification when it dings</label>
+    </div>
+
+    <div class="status" id="status">Idle.</div>
+  </div>
+
+  <script>
+    // --- Explanation of previous flicker ---
+    // If Start is clicked more than once, multiple loops run concurrently
+    // and write to the status element at slightly different times, which
+    // looks like numbers "switching back". We prevent that with a runId token
+    // and by disabling Start while running.
+
+    const els = {
+      max: document.getElementById('maxSeconds'),
+      start: document.getElementById('start'),
+      stop: document.getElementById('stop'),
+      status: document.getElementById('status'),
+      notify: document.getElementById('notify'),
+      card: document.getElementById('card'),
+    };
+
+    let runId = 0; // changes each time we start; loop reads a local copy
+    let audioCtx = null;
+
+    function ensureAudioCtx() {
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      // resume on user gesture in case the context is suspended
+      if (audioCtx.state === 'suspended') {
+        audioCtx.resume();
+      }
+      return audioCtx;
+    }
+
+    // function beep(durationMs = 220, freq = 880) {
+    //   const ctx = ensureAudioCtx();
+    //   const osc = ctx.createOscillator();
+    //   const gain = ctx.createGain();
+    //   osc.frequency.value = freq;
+    //   gain.gain.value = 0.15; // polite volume
+    //   osc.connect(gain).connect(ctx.destination);
+    //   const now = ctx.currentTime;
+    //   osc.start(now);
+    //   osc.stop(now + durationMs / 1000);
+    // }
+
+    function beep() {
+        const ctx = ensureAudioCtx();
+        const now = ctx.currentTime;
+
+        // First tone (high)
+        const osc1 = ctx.createOscillator();
+        const gain1 = ctx.createGain();
+        osc1.type = 'sine';
+        osc1.frequency.value = 1047; // C6
+        gain1.gain.setValueAtTime(0.15, now);
+        gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+        osc1.connect(gain1).connect(ctx.destination);
+        osc1.start(now);
+        osc1.stop(now + 0.15);
+
+        // Second tone (low), starts right after the first
+        const osc2 = ctx.createOscillator();
+        const gain2 = ctx.createGain();
+        osc2.type = 'sine';
+        osc2.frequency.value = 784; // G5
+        gain2.gain.setValueAtTime(0.15, now + 0.15);
+        gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+        osc2.connect(gain2).connect(ctx.destination);
+        osc2.start(now + 0.15);
+        osc2.stop(now + 0.3);
+    }
+
+
+    async function maybeRequestNotificationPermission() {
+      if (!('Notification' in window)) return false;
+      if (Notification.permission === 'granted') return true;
+      if (Notification.permission === 'denied') return false;
+      try {
+        const res = await Notification.requestPermission();
+        return res === 'granted';
+      } catch { return false; }
+    }
+
+    function showDesktopNotification() {
+      if (!('Notification' in window)) return;
+      new Notification('Ding!', { body: 'Random hit: 1', silent: true });
+    }
+
+    function setRunningUI(running) {
+      els.start.disabled = running;
+      els.stop.disabled = !running;
+      els.max.disabled = running;
+    }
+
+    function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+    els.start.addEventListener('click', async () => {
+      const max = parseInt(els.max.value, 10);
+      if (!Number.isFinite(max) || max < 1) {
+        alert('Please enter an integer ≥ 1.');
+        return;
+      }
+      if (els.notify.checked) {
+        await maybeRequestNotificationPermission();
+      }
+
+      // unique token for this run
+      const myRun = ++runId;
+      setRunningUI(true);
+      els.status.textContent = 'Running…';
+      ensureAudioCtx(); // prime
+
+      while (myRun === runId) {
+        const n = Math.floor(Math.random() * max) + 1; // [1..max]
+        els.status.textContent = `Random number: ${n}`;
+        if (n === 1) {
+          // visual flash
+          els.card.classList.remove('flash');
+          void els.card.offsetWidth; // restart animation
+          els.card.classList.add('flash');
+          // audio
+          beep();
+          // optional desktop notification
+          if (els.notify.checked && 'Notification' in window && Notification.permission === 'granted') {
+            showDesktopNotification();
+          }
+        }
+        await sleep(1000);
+      }
+    });
+
+    els.stop.addEventListener('click', () => {
+      runId++; // cancels the loop
+      setRunningUI(false);
+      els.status.textContent = 'Stopped.';
+    });
+
+    // Safety: also cancel the loop when the page/tab is hidden (optional)
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        runId++;
+        setRunningUI(false);
+        els.status.textContent = 'Paused (tab hidden).';
+      }
+    });
+  </script>
+</body>
+</html>
